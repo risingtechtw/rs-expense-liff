@@ -4,6 +4,10 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>RS 報帳小幫手</title>
+  <!-- 提前建立連線，加快載入 -->
+  <link rel="preconnect" href="https://static.line-scdn.net">
+  <link rel="preconnect" href="https://script.google.com">
+  <link rel="preconnect" href="https://script.googleusercontent.com" crossorigin>
   <!-- LIFF SDK -->
   <script src="https://static.line-scdn.net/liff/edge/2/sdk.js"></script>
   <style>
@@ -130,7 +134,7 @@
   </div>
 
   <!-- 版本標記：用來確認線上跑的是不是最新版 -->
-  <div style="text-align:center;color:#c2c9d2;font-size:11px;margin-top:10px">build: v9</div>
+  <div style="text-align:center;color:#c2c9d2;font-size:11px;margin-top:10px">build: v10</div>
 
   <script>
     // ===== 設定 =====
@@ -165,15 +169,20 @@
     var done = false;
     function fatal(text) { done = true; els.loading.textContent = text; }
 
-    // 逾時偵測：超過 10 秒沒完成就印出診斷
+    // 逾時偵測：超過 30 秒沒完成就印出診斷
     setTimeout(function () {
       if (done) return;
-      fatal('初始化逾時（10 秒）。診斷資訊：\n' +
+      fatal('初始化逾時（30 秒）。診斷資訊：\n' +
         '· LIFF_ID = ' + LIFF_ID + '\n' +
         '· liff SDK = ' + (typeof liff === 'undefined' ? '未載入' : '已載入') + '\n' +
         '· isInClient = ' + (typeof liff !== 'undefined' && liff.isInClient ? liff.isInClient() : '未知') + '\n' +
         '· 網址 = ' + location.href);
-    }, 10000);
+    }, 30000);
+
+    // ===== 提前發動 GAS 取選項 (不需等 LIFF，與 liff.init 並行以加快載入) =====
+    var formDataPromise = fetch(GAS_URL, { method: 'POST', body: JSON.stringify({ action: 'getFormData' }) })
+      .then(function (res) { return res.json(); })
+      .catch(function (err) { return { ok: false, error: (err && err.message ? err.message : String(err)) }; });
 
     // ===== 初始化 LIFF =====
     try {
@@ -184,13 +193,15 @@
           .then(function () {
             if (!liff.isLoggedIn()) {
               liff.login(); // 導去登入，回來會重新載入頁面
-              return;
+              return null;
             }
             idToken = liff.getIDToken();
-            return liff.getProfile().then(function (profile) {
-              els.hello.textContent = '登錄人員：' + profile.displayName;
-              return loadFormData(); // 抓下拉選項
-            });
+            return liff.getProfile();
+          })
+          .then(function (profile) {
+            if (!profile) return;                       // 已跳轉登入
+            els.hello.textContent = '登錄人員：' + profile.displayName;
+            return formDataPromise.then(applyFormData); // GAS 通常已先回來
           })
           .catch(function (err) {
             fatal('LIFF 初始化失敗：' + (err && err.message ? err.message : err));
@@ -200,25 +211,21 @@
       fatal('發生錯誤：' + (err && err.message ? err.message : err));
     }
 
-    // ===== 向 GAS 取得下拉選項 =====
-    function loadFormData() {
-      return fetch(GAS_URL, { method: 'POST', body: JSON.stringify({ action: 'getFormData' }) })
-        .then(function (res) { return res.json(); })
-        .then(function (data) {
-          if (!data || !data.ok) throw new Error((data && data.error) ? data.error : '讀取選項失敗');
-          fillSelect(els.targetSheet, data.targetSheets, localStorage.getItem(LS.target), true);
-          fillSelect(els.item, data.items, localStorage.getItem(LS.item));
-          fillSelect(els.currency, data.currencies, localStorage.getItem(LS.currency));
-          fillSelect(els.payment, data.payments, localStorage.getItem(LS.payment));
-          els.date.value = todayStr();   // 日期預設今天
-          recalcAmount();
-          done = true;
-          els.loading.classList.add('hidden');
-          els.app.classList.remove('hidden');
-        })
-        .catch(function (err) {
-          fatal('讀取選項失敗：' + (err && err.message ? err.message : err) + '\n\nGAS_URL = ' + GAS_URL);
-        });
+    // ===== 把 GAS 回來的選項套到表單 =====
+    function applyFormData(data) {
+      if (!data || !data.ok) {
+        fatal('讀取選項失敗：' + ((data && data.error) ? data.error : '未知錯誤') + '\n\nGAS_URL = ' + GAS_URL);
+        return;
+      }
+      fillSelect(els.targetSheet, data.targetSheets, localStorage.getItem(LS.target), true);
+      fillSelect(els.item, data.items, localStorage.getItem(LS.item));
+      fillSelect(els.currency, data.currencies, localStorage.getItem(LS.currency));
+      fillSelect(els.payment, data.payments, localStorage.getItem(LS.payment));
+      els.date.value = todayStr();   // 日期預設今天
+      recalcAmount();
+      done = true;
+      els.loading.classList.add('hidden');
+      els.app.classList.remove('hidden');
     }
 
     // 建立下拉選項；remembered 有值且存在於清單時自動選取。
