@@ -92,6 +92,9 @@
       <h1>RS 報帳小幫手</h1>
       <p id="hello" class="hello"></p>
 
+      <button type="button" id="refreshBtn" class="secondary"
+              style="width:auto;margin-top:0;margin-bottom:6px;padding:7px 12px;font-size:13px;">↻ 重新整理選項</button>
+
       <form id="expenseForm">
         <label>目標分頁<span class="req">*</span></label>
         <select id="targetSheet" required></select>
@@ -134,7 +137,7 @@
   </div>
 
   <!-- 版本標記：用來確認線上跑的是不是最新版 -->
-  <div style="text-align:center;color:#c2c9d2;font-size:11px;margin-top:10px">build: v10</div>
+  <div style="text-align:center;color:#c2c9d2;font-size:11px;margin-top:10px">build: v11</div>
 
   <script>
     // ===== 設定 =====
@@ -145,6 +148,22 @@
     // localStorage 記憶用的 key
     var LS = { target: 'rs_target', item: 'rs_item', currency: 'rs_currency', payment: 'rs_payment' };
 
+    // 記憶有效期 14 天：存 {v:值, t:時間戳}，讀取時超過 14 天視為沒記憶
+    var MEMORY_TTL_MS = 14 * 24 * 60 * 60 * 1000;
+    function memSet(key, value) {
+      try { localStorage.setItem(key, JSON.stringify({ v: value, t: Date.now() })); } catch (e) {}
+    }
+    function memGet(key) {
+      try {
+        var raw = localStorage.getItem(key);
+        if (!raw) return null;
+        var o = JSON.parse(raw);
+        if (!o || typeof o.t !== 'number') return null;       // 舊格式/壞資料 → 當沒記憶
+        if (Date.now() - o.t > MEMORY_TTL_MS) { localStorage.removeItem(key); return null; } // 過期
+        return o.v;
+      } catch (e) { return null; }
+    }
+
     var idToken = null;
 
     var els = {
@@ -152,6 +171,7 @@
       app: document.getElementById('app'),
       hello: document.getElementById('hello'),
       form: document.getElementById('expenseForm'),
+      refreshBtn: document.getElementById('refreshBtn'),
       targetSheet: document.getElementById('targetSheet'),
       date: document.getElementById('date'),
       item: document.getElementById('item'),
@@ -217,16 +237,40 @@
         fatal('讀取選項失敗：' + ((data && data.error) ? data.error : '未知錯誤') + '\n\nGAS_URL = ' + GAS_URL);
         return;
       }
-      fillSelect(els.targetSheet, data.targetSheets, localStorage.getItem(LS.target), true);
-      fillSelect(els.item, data.items, localStorage.getItem(LS.item));
-      fillSelect(els.currency, data.currencies, localStorage.getItem(LS.currency));
-      fillSelect(els.payment, data.payments, localStorage.getItem(LS.payment));
+      fillSelect(els.targetSheet, data.targetSheets, memGet(LS.target), true);
+      fillSelect(els.item, data.items, memGet(LS.item));
+      fillSelect(els.currency, data.currencies, memGet(LS.currency));
+      fillSelect(els.payment, data.payments, memGet(LS.payment));
       els.date.value = todayStr();   // 日期預設今天
       recalcAmount();
       done = true;
       els.loading.classList.add('hidden');
       els.app.classList.remove('hidden');
     }
+
+    // ===== 重新整理選項：強制 GAS 略過快取重抓「清單來源」三項，並更新目標分頁 =====
+    els.refreshBtn.addEventListener('click', function () {
+      els.refreshBtn.disabled = true;
+      var label = els.refreshBtn.textContent;
+      els.refreshBtn.textContent = '重新整理中…';
+      fetch(GAS_URL, { method: 'POST', body: JSON.stringify({ action: 'getFormData', refresh: true }) })
+        .then(function (res) { return res.json(); })
+        .then(function (data) {
+          if (!data || !data.ok) throw new Error((data && data.error) ? data.error : '讀取選項失敗');
+          // 保留目前已選的值 (用現值當 remembered)，避免重抓後被清掉
+          fillSelect(els.item, data.items, els.item.value);
+          fillSelect(els.currency, data.currencies, els.currency.value);
+          fillSelect(els.payment, data.payments, els.payment.value);
+          fillSelect(els.targetSheet, data.targetSheets, els.targetSheet.value, true);
+        })
+        .catch(function (err) {
+          showMsg('重新整理失敗：' + (err && err.message ? err.message : err), 'err');
+        })
+        .then(function () {
+          els.refreshBtn.disabled = false;
+          els.refreshBtn.textContent = label;
+        });
+    });
 
     // 建立下拉選項；remembered 有值且存在於清單時自動選取。
     // defaultFirst=true 時，若沒有記憶或記憶不在清單，預設選第一個選項 (供目標分頁用)。
@@ -297,11 +341,11 @@
         .then(function (res) { return res.json(); })
         .then(function (data) {
           if (data && data.ok) {
-            // 記憶下拉的選擇
-            localStorage.setItem(LS.target, payload.targetSheet);
-            localStorage.setItem(LS.item, payload.item);
-            localStorage.setItem(LS.currency, payload.currency);
-            localStorage.setItem(LS.payment, payload.payment);
+            // 記憶下拉的選擇 (14 天過期)
+            memSet(LS.target, payload.targetSheet);
+            memSet(LS.item, payload.item);
+            memSet(LS.currency, payload.currency);
+            memSet(LS.payment, payload.payment);
             onSuccess(data.message);
           } else {
             onFailure((data && data.error) ? data.error : '未知錯誤');
